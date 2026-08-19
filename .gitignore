@@ -1,0 +1,31 @@
+# Build products
+/build/
+/dist/
+*.deb
+
+# Python and editor state
+__pycache__/
+*.py[cod]
+.*.swp
+.idea/
+.vscode/
+
+# Wardrive captures and wireless/GPS data
+*.kismet
+*.kismet-journal
+*.wiglecsv
+*.pcap
+*.pcapng
+*.cap
+*.gpx
+*.geojson
+*.kml
+
+# Local secrets and application state
+.env
+.env.*
+!.env.example
+settings.json
+profiles.json
+uploads.json
+kenna_settings.json

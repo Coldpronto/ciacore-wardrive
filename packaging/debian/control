@@ -1,0 +1,11 @@
+Package: ciacore-wardrive
+Version: 1.0.0
+Section: net
+Priority: optional
+Architecture: all
+Maintainer: CIACORE Cybersecurity
+Depends: python3, python3-tk, kismet, kismet-logtools
+Recommends: gpsd, gpsd-clients, aircrack-ng, network-manager, libnotify-bin, policykit-1
+Description: Desktop wardrive launcher for Kismet
+ A Tk desktop dashboard for starting and monitoring authorized Kismet
+ wardrives, viewing GPS and access-point activity, and exporting captures.

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=CIACORE Wardrive
+Comment=Launch Kismet in wardrive mode
+Exec=ciacore-wardrive
+Icon=ciacore-wardrive
+Terminal=false
+StartupNotify=true
+Categories=Network;
+Keywords=Kismet;WiFi;GPS;Wardrive;
