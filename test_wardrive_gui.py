@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from wardrive_gui import (
-    CaptureSource, WardriveApp, access_point_count, adapter_pickup_stats, build_command, export_wigle_csv, format_file_size, gps_text,
+    CaptureSource, WardriveApp, access_point_count, observed_access_point_count, adapter_pickup_stats, build_command, export_wigle_csv, format_file_size, gps_text,
     kismet_web_url,
     device_map_points, managed_interface_name, monitor_interface_name, network_details,
     load_wdgwars_api_key, save_wdgwars_api_key, upload_wdgwars_csv,
@@ -19,9 +19,10 @@ from wardrive_gui import (
     save_upload_history, valid_wdgwars_api_key, wdgwars_account,
     compare_sessions, export_geodata, find_recoverable_databases, read_wigle_records,
     session_analytics, load_profiles, save_profiles,
-    gps_device_choices, gps_device_kind,
+    gps_device_choices, gps_device_kind, gps_report_device, gps_active_device,
     ap_activity_level, adapter_stats_visible_rows, OUTPUT_BATCH_LINES,
     CHANNEL_PLANS, CUSTOM_HOP_PLAN, FIXED_CHANNEL_PLAN, channel_plan_for,
+    hopping_configuration_errors, source_channel_status,
 )
 
 
@@ -41,6 +42,22 @@ class BuildCommandTests(unittest.TestCase):
             ("Internal — /dev/ttyS0", "/dev/ttyS0"),
             ("USB — /dev/ttyUSB0", "/dev/ttyUSB0"),
         ])
+
+    def test_normalizes_gps_report_receiver(self):
+        self.assertEqual(gps_report_device({"device": " /dev/ttyUSB0 "}), "/dev/ttyUSB0")
+        self.assertEqual(gps_report_device({"class": "TPV"}), "")
+        self.assertEqual(gps_report_device(None), "")
+
+    def test_automatic_gps_waits_for_a_working_receiver(self):
+        no_fix = {"class": "TPV", "device": "/dev/ttyS0", "mode": 1}
+        usb_fix = {"class": "TPV", "device": "/dev/ttyUSB0", "mode": 3}
+        self.assertEqual(gps_active_device("", "", no_fix), "")
+        self.assertEqual(gps_active_device("", "", usb_fix), "/dev/ttyUSB0")
+        self.assertEqual(gps_active_device("/dev/ttyUSB0", "", no_fix), "/dev/ttyUSB0")
+
+    def test_configured_gps_receiver_remains_selected(self):
+        report = {"class": "TPV", "device": "/dev/ttyUSB0", "mode": 3}
+        self.assertEqual(gps_active_device("", "/dev/ttyACM0", report), "/dev/ttyACM0")
 
     def test_classifies_ap_pickup_activity(self):
         self.assertEqual(ap_activity_level(35, 1), ("VERY ACTIVE", "success"))
@@ -132,6 +149,21 @@ class BuildCommandTests(unittest.TestCase):
             "wlan1:channel_hop=false,channel=36",
         ])
 
+    def test_rejects_a_one_channel_hop_plan(self):
+        self.assertEqual(len(hopping_configuration_errors([CaptureSource("wlan0", "hop", "1")])), 1)
+        self.assertEqual(hopping_configuration_errors([CaptureSource("wlan0", "hop", "1,6,11")]), [])
+        self.assertEqual(hopping_configuration_errors([CaptureSource("wlan0", "hop", "")]), [])
+        self.assertEqual(hopping_configuration_errors([CaptureSource("wlan0", "fixed", "1")]), [])
+
+    def test_reports_live_source_channel_health(self):
+        sources = [{
+            "kismet.datasource.capture_interface": "wlan0mon",
+            "kismet.datasource.channel": "6",
+            "kismet.datasource.hopping": 1,
+            "kismet.datasource.hop_channels": ["1", "6", "11"],
+        }]
+        self.assertEqual(source_channel_status(sources), [("wlan0mon", "6", 3, True)])
+
     def test_recognizes_channel_group_presets_and_custom_sources(self):
         self.assertEqual(channel_plan_for("hop", "1, 6, 11"), "2.4 GHz priority (1, 6, 11)")
         self.assertEqual(channel_plan_for("hop", "3,7"), CUSTOM_HOP_PLAN)
@@ -155,6 +187,35 @@ class BuildCommandTests(unittest.TestCase):
         ]
         self.assertEqual(access_point_count(views), 17)
         self.assertIsNone(access_point_count({}))
+
+    def test_ap_count_falls_back_to_device_list(self):
+        devices = [{"key": "ap-1"}, {"key": "ap-2"}]
+        self.assertEqual(observed_access_point_count({}, devices), 2)
+        self.assertEqual(observed_access_point_count([], []), 0)
+        self.assertIsNone(observed_access_point_count(None, None))
+
+    def test_ap_view_count_wins_over_device_fallback(self):
+        views = [{
+            "kismet.devices.view.id": "phydot11_accesspoints",
+            "kismet.devices.view.size": 17,
+        }]
+        self.assertEqual(observed_access_point_count(views, [{"key": "partial"}]), 17)
+
+    def test_ap_count_accepts_wrapped_and_tjson_kismet_shapes(self):
+        views = {"views": [{
+            "kismet_devices_view_id": "phy80211_accesspoints",
+            "kismet_devices_view_size": 18,
+        }]}
+        devices = {"data": [{"key": "ap-1"}], "recordsTotal": 19}
+        self.assertEqual(access_point_count(views), 18)
+        self.assertEqual(observed_access_point_count(views, devices), 19)
+
+    def test_ap_count_ignores_a_stale_lower_view_summary(self):
+        views = [{
+            "kismet.devices.view.id": "phydot11_accesspoints",
+            "kismet.devices.view.size": 2,
+        }]
+        self.assertEqual(observed_access_point_count(views, [{}, {}, {}]), 3)
 
     def test_extracts_and_sorts_network_details(self):
         devices = [

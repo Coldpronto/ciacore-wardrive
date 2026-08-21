@@ -322,6 +322,20 @@ def channel_plan_for(mode: str, channels: str) -> str:
     return CUSTOM_HOP_PLAN
 
 
+def hopping_configuration_errors(sources: list[CaptureSource]) -> list[str]:
+    """Describe source settings which claim to hop but cannot change channel."""
+    errors = []
+    for source in sources:
+        channels = [part.strip() for part in source.channels.split(",") if part.strip()]
+        if source.mode == "hop" and len(channels) == 1:
+            errors.append(
+                f"{source.interface}: hopping needs at least two channels; "
+                f"choose a channel-group preset, leave it blank for all supported channels, "
+                f"or use Fixed channel for {channels[0]}"
+            )
+    return errors
+
+
 @dataclass(frozen=True)
 class SessionStats:
     path: Path
@@ -654,11 +668,26 @@ def export_wigle_csv(log_directory: Path, log_title: str) -> tuple[Path | None, 
 
 
 def network_interfaces() -> list[str]:
+    """Return capture-capable wireless interfaces exposed by Linux sysfs.
+
+    Looking only at ``/sys/class/net/*/wireless`` misses some USB drivers while
+    they are initializing (and some monitor VIFs). The corresponding phy's
+    ``device/net`` directory is the authoritative fallback.
+    """
     base = Path("/sys/class/net")
     if not base.is_dir():
         return []
-    interfaces = [entry.name for entry in base.iterdir() if entry.name != "lo"]
-    return sorted(interfaces, key=lambda name: (not (base / name / "wireless").exists(), name))
+    interfaces = {
+        entry.name for entry in base.iterdir()
+        if entry.name != "lo" and (entry / "wireless").exists()
+    }
+    phy_base = Path("/sys/class/ieee80211")
+    if phy_base.is_dir():
+        for phy in phy_base.iterdir():
+            net_dir = phy / "device" / "net"
+            if net_dir.is_dir():
+                interfaces.update(entry.name for entry in net_dir.iterdir() if (base / entry.name).exists())
+    return sorted(interfaces)
 
 
 def managed_interface_name(interface: str) -> str:
@@ -705,18 +734,73 @@ def gps_device_choices(devices: object) -> list[tuple[str, str]]:
     return sorted(set(choices), key=lambda item: (item[0].split(" — ", 1)[0] != "Internal", item[0]))
 
 
+def gps_report_device(report: object) -> str:
+    """Normalize a GPSD report's receiver path for stable source selection."""
+    if not isinstance(report, dict):
+        return ""
+    device = report.get("device")
+    return device.strip() if isinstance(device, str) else ""
+
+
+def gps_active_device(active: str, configured: str, report: object) -> str:
+    """Choose a receiver only after it supplies a fix in automatic mode."""
+    if configured:
+        return configured
+    if active or not isinstance(report, dict) or report.get("class") != "TPV":
+        return active
+    mode = report.get("mode", 0)
+    if not isinstance(mode, (int, float)) or mode < 2:
+        return active
+    return gps_report_device(report)
+
+
 def access_point_count(views: object) -> int | None:
     """Extract Kismet's Wi-Fi AP view size from an all_views response."""
+    if isinstance(views, dict):
+        views = views.get("data", views.get("views"))
     if not isinstance(views, list):
         return None
     for view in views:
         if not isinstance(view, dict):
             continue
-        view_id = view.get("kismet.devices.view.id")
+        view_id = view.get(
+            "kismet.devices.view.id",
+            view.get("kismet_devices_view_id", view.get("id")),
+        )
         if view_id in {"phydot11_accesspoints", "phy80211_accesspoints"}:
-            size = view.get("kismet.devices.view.size")
-            return int(size) if isinstance(size, (int, float)) else None
+            size = view.get(
+                "kismet.devices.view.size",
+                view.get("kismet_devices_view_size", view.get("size")),
+            )
+            return int(size) if isinstance(size, (int, float)) and size >= 0 else None
     return None
+
+
+def device_records(devices: object) -> list[object] | None:
+    """Normalize plain and DataTables-wrapped Kismet device responses."""
+    if isinstance(devices, list):
+        return devices
+    if isinstance(devices, dict):
+        records = devices.get("data", devices.get("devices"))
+        return records if isinstance(records, list) else None
+    return None
+
+
+def observed_access_point_count(views: object, devices: object) -> int | None:
+    """Return the AP total, falling back to Kismet's AP device response."""
+    candidates = [count for count in (access_point_count(views),) if count is not None]
+    records = device_records(devices)
+    if records is not None:
+        candidates.append(len(records))
+    if isinstance(devices, dict):
+        for key in ("recordsTotal", "recordsFiltered", "total"):
+            total = devices.get(key)
+            if isinstance(total, int) and total >= 0:
+                candidates.append(total)
+    # Kismet refreshes the view summary and device response independently.
+    # Prefer the largest valid snapshot so a stale summary cannot freeze or
+    # move the displayed session count backwards.
+    return max(candidates) if candidates else None
 
 
 def ap_activity_level(rate_per_minute: float, seconds_since_pickup: float | None) -> tuple[str, str]:
@@ -791,6 +875,29 @@ def adapter_pickup_stats(sources: object, devices: object) -> list[tuple[str, in
         ((source_names[uuid], values[0], values[1]) for uuid, values in totals.items()),
         key=lambda item: (-item[1], item[0]),
     )
+
+
+def source_channel_status(sources: object) -> list[tuple[str, str, int, bool]]:
+    """Return adapter, current channel, hop-list size, and hopping state."""
+    if not isinstance(sources, list):
+        return []
+    status = []
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        name = (source.get("kismet.datasource.capture_interface") or
+                source.get("kismet.datasource.interface") or
+                source.get("kismet.datasource.name"))
+        if not isinstance(name, str) or not name.strip():
+            continue
+        channel = source.get("kismet.datasource.channel")
+        hop_channels = source.get("kismet.datasource.hop_channels")
+        hopping = bool(source.get("kismet.datasource.hopping"))
+        status.append((
+            name.strip(), str(channel).strip() if channel is not None else "",
+            len(hop_channels) if isinstance(hop_channels, list) else 0, hopping,
+        ))
+    return sorted(status)
 
 
 def device_map_points(devices: object) -> list[dict[str, object]]:
@@ -868,6 +975,7 @@ class WardriveApp(tk.Tk):
         self.ap_queue: queue.Queue[int | None] = queue.Queue()
         self.networks_queue: queue.Queue[list[tuple[str, int | None]]] = queue.Queue()
         self.adapter_stats_queue: queue.Queue[list[tuple[str, int, int]]] = queue.Queue()
+        self.channel_status_queue: queue.Queue[list[tuple[str, str, int, bool]]] = queue.Queue()
         self.network_queue: queue.Queue[str] = queue.Queue()
         self.wdgwars_queue: queue.Queue[dict[str, object]] = queue.Queue()
         self.history_queue: queue.Queue[list[SessionStats] | BaseException] = queue.Queue()
@@ -921,6 +1029,8 @@ class WardriveApp(tk.Tk):
         self._adapter_packet_samples: dict[str, tuple[int, float]] = {}
         self._gps_was_fixed = False
         self._adapter_stall_notified: set[str] = set()
+        self._channel_warning_notified: set[str] = set()
+        self._channel_status: dict[str, tuple[str, int, bool]] = {}
         self._output_line_count = 0
 
         self._configure_theme()
@@ -1166,12 +1276,15 @@ class WardriveApp(tk.Tk):
         adapter_frame.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         adapter_frame.columnconfigure(0, weight=1)
         self.adapter_stats = ttk.Treeview(
-            adapter_frame, columns=("adapter", "aps", "packets", "rate", "health"), show="headings", height=3,
+            adapter_frame, columns=("adapter", "channel", "hop", "aps", "packets", "rate", "health"), show="headings", height=3,
         )
-        for column, label in (("adapter", "Adapter"), ("aps", "Unique APs"), ("packets", "Packets"),
+        for column, label in (("adapter", "Adapter"), ("channel", "Now"), ("hop", "Hop plan"),
+                              ("aps", "Unique APs"), ("packets", "Packets"),
                               ("rate", "Packets/s"), ("health", "Health")):
             self.adapter_stats.heading(column, text=label)
         self.adapter_stats.column("adapter", anchor="w", minwidth=180)
+        self.adapter_stats.column("channel", width=70, stretch=False, anchor="center")
+        self.adapter_stats.column("hop", width=90, stretch=False, anchor="center")
         self.adapter_stats.column("aps", width=100, stretch=False, anchor="center")
         self.adapter_stats.column("packets", width=120, stretch=False, anchor="e")
         self.adapter_stats.column("rate", width=90, stretch=False, anchor="e")
@@ -1182,6 +1295,12 @@ class WardriveApp(tk.Tk):
         self.adapter_stats.configure(yscrollcommand=adapter_stats_scroll.set)
         self.adapter_stats.grid(row=0, column=0, sticky="nsew")
         adapter_stats_scroll.grid(row=0, column=1, sticky="ns")
+        self.channel_warning = tk.StringVar(value="Channel telemetry waiting for Kismet")
+        self.channel_warning_label = tk.Label(
+            adapter_frame, textvariable=self.channel_warning, bg=COLORS["void"], fg=COLORS["muted"],
+            anchor="w", font=("DejaVu Sans Mono", 9, "bold"),
+        )
+        self.channel_warning_label.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
 
         wdgwars = ttk.LabelFrame(outer, text=" WDGWARS UPLINK ", padding=8)
         wdgwars.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(0, 10))
@@ -1274,28 +1393,41 @@ class WardriveApp(tk.Tk):
         sources_url = "http://127.0.0.1:2501/datasource/all_sources.json"
         while not self.shutdown_event.is_set():
             count = None
+            views: object = None
+            devices: object = None
             networks: list[tuple[str, int | None]] = []
             adapter_stats: list[tuple[str, int, int]] = []
+            channel_status: list[tuple[str, str, int, bool]] = []
+            credentials = base64.b64encode(
+                f"{self.api_username}:{self.api_password}".encode("utf-8")
+            ).decode("ascii")
+            headers = {"Authorization": f"Basic {credentials}"}
             try:
-                credentials = base64.b64encode(
-                    f"{self.api_username}:{self.api_password}".encode("utf-8")
-                ).decode("ascii")
-                headers = {"Authorization": f"Basic {credentials}"}
                 request = urllib.request.Request(views_url, headers=headers)
                 with urllib.request.urlopen(request, timeout=2) as response:
-                    count = access_point_count(json.load(response))
+                    views = json.load(response)
+            except (OSError, ValueError):
+                pass
+            try:
                 request = urllib.request.Request(networks_url, headers=headers)
                 with urllib.request.urlopen(request, timeout=2) as response:
                     devices = json.load(response)
-                networks = network_details(devices)
+                networks = network_details(device_records(devices))
+            except (OSError, ValueError):
+                pass
+            count = observed_access_point_count(views, devices)
+            try:
                 request = urllib.request.Request(sources_url, headers=headers)
                 with urllib.request.urlopen(request, timeout=2) as response:
-                    adapter_stats = adapter_pickup_stats(json.load(response), devices)
+                    source_data = json.load(response)
+                    adapter_stats = adapter_pickup_stats(source_data, device_records(devices))
+                    channel_status = source_channel_status(source_data)
             except (OSError, ValueError):
                 pass
             self.ap_queue.put(count)
             self.networks_queue.put(networks)
             self.adapter_stats_queue.put(adapter_stats)
+            self.channel_status_queue.put(channel_status)
             self.shutdown_event.wait(2)
 
     def _drain_ap_count(self) -> None:
@@ -1377,16 +1509,45 @@ class WardriveApp(tk.Tk):
 
     def _drain_adapter_stats(self) -> None:
         latest = None
+        latest_channels = None
         try:
             while True:
                 latest = self.adapter_stats_queue.get_nowait()
         except queue.Empty:
             pass
+        try:
+            while True:
+                latest_channels = self.channel_status_queue.get_nowait()
+        except queue.Empty:
+            pass
+        if latest_channels is not None:
+            self._channel_status = {
+                adapter: (channel, hop_count, hopping)
+                for adapter, channel, hop_count, hopping in latest_channels
+            }
+            broken = [adapter for adapter, (_channel, count, hopping) in self._channel_status.items()
+                      if hopping and count < 2]
+            if broken:
+                detail = ", ".join(f"{adapter} ({self._channel_status[adapter][1]} channel)" for adapter in broken)
+                self.channel_warning.set(f"⚠ NOT HOPPING: {detail}")
+                self.channel_warning_label.configure(fg=COLORS["danger"])
+                for adapter in broken:
+                    if adapter not in self._channel_warning_notified:
+                        self._notify("Wardrive channel warning", f"{adapter} is configured to hop but has fewer than two channels.")
+                        self._channel_warning_notified.add(adapter)
+            else:
+                summaries = [f"{adapter}: {count}ch" for adapter, (_channel, count, hopping) in self._channel_status.items()
+                             if hopping]
+                self.channel_warning.set("HOPPING OK  •  " + "  •  ".join(summaries) if summaries else "No hopping adapters active")
+                self.channel_warning_label.configure(fg=COLORS["success"] if summaries else COLORS["muted"])
+                self._channel_warning_notified.clear()
         if latest is not None:
             self.adapter_stats.delete(*self.adapter_stats.get_children())
             self.adapter_stats.configure(height=adapter_stats_visible_rows(len(latest)))
             now = time.monotonic()
             for adapter, access_points, packets in latest:
+                channel, hop_count, hopping = self._channel_status.get(adapter, ("", 0, False))
+                hop_text = f"{hop_count} ch" if hopping else "FIXED"
                 previous = self._adapter_packet_samples.get(adapter)
                 rate = max(0.0, (packets - previous[0]) / (now - previous[1])) if previous and now > previous[1] else 0.0
                 health = "OK" if rate > 0 or not self.process or self.process.poll() is not None else "STALLED"
@@ -1397,7 +1558,8 @@ class WardriveApp(tk.Tk):
                     self._adapter_stall_notified.discard(adapter)
                 self._adapter_packet_samples[adapter] = (packets, now)
                 self.adapter_stats.insert(
-                    "", "end", values=(adapter, f"{access_points:,}", f"{packets:,}", f"{rate:,.1f}", health),
+                    "", "end", values=(adapter, channel or "—", hop_text, f"{access_points:,}",
+                                        f"{packets:,}", f"{rate:,.1f}", health),
                 )
         if not self.shutdown_event.is_set():
             self.after(290, self._drain_adapter_stats)
@@ -1694,6 +1856,10 @@ class WardriveApp(tk.Tk):
         """Stream TPV/SKY reports from the standard local GPSD socket."""
         while not self.shutdown_event.is_set():
             self.gps_reconnect_event.clear()
+            # Automatic mode locks to one receiver per connection. Otherwise
+            # interleaved reports from two GPS units make the fix jump between
+            # receivers and can falsely signal that a good fix was lost.
+            active_device = self._gps_device_filter
             try:
                 with socket.create_connection(("127.0.0.1", 2947), timeout=3) as gpsd:
                     gpsd.settimeout(4)
@@ -1715,10 +1881,12 @@ class WardriveApp(tk.Tk):
                                 continue
                             kind = report.get("class")
                             if kind == "DEVICES":
-                                self.gps_queue.put({"devices": gps_device_choices(report.get("devices"))})
+                                choices = gps_device_choices(report.get("devices"))
+                                self.gps_queue.put({"devices": choices})
                                 continue
-                            report_device = report.get("device")
-                            if self._gps_device_filter and report_device != self._gps_device_filter:
+                            report_device = gps_report_device(report)
+                            active_device = gps_active_device(active_device, self._gps_device_filter, report)
+                            if active_device and report_device != active_device:
                                 continue
                             if kind == "TPV":
                                 mode = int(report.get("mode", 0))
@@ -2387,6 +2555,10 @@ class WardriveApp(tk.Tk):
         if not sources:
             messagebox.showerror(APP_NAME, "Select at least one network adapter.")
             return
+        hop_errors = hopping_configuration_errors(sources)
+        if hop_errors:
+            messagebox.showerror(APP_NAME, "Invalid channel hopping configuration:\n\n" + "\n".join(hop_errors))
+            return
         available = set(network_interfaces())
         if any(source.interface not in available for source in sources):
             messagebox.showerror(APP_NAME, "A selected network adapter is no longer available.")
@@ -2427,6 +2599,10 @@ class WardriveApp(tk.Tk):
         self.gps_track.clear()
         self._adapter_packet_samples.clear()
         self._adapter_stall_notified.clear()
+        self._channel_warning_notified.clear()
+        self._channel_status.clear()
+        self.channel_warning.set("Channel telemetry waiting for Kismet")
+        self.channel_warning_label.configure(fg=COLORS["muted"])
         self.networks.delete(*self.networks.get_children())
         self._append_output(f"Starting: {' '.join(command)}\n")
         try:

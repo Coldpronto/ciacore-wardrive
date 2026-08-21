@@ -9,7 +9,7 @@ driving: green means **GPS Locked**, amber means **Acquiring GPS**, and red mean
 **GPS Lost** or stale coordinates. It includes the selected receiver, satellite count,
 and fix age. Warning states pulse gently, with one audible cue when a lock is lost and
 two when it recovers.
-The large **Unique Access Points Found** counter and signal-sorted network list read Kismet's dedicated Wi-Fi AP view and update every two seconds. The **Adapter Pickup Stats** panel attributes unique APs and packets to each active capture adapter using Kismet's per-device source data. While capturing, the launcher also displays the current Wigle CSV file size.
+The large **Unique Access Points Found** counter and signal-sorted network list read Kismet's dedicated Wi-Fi AP view and update every two seconds. The **Adapter Pickup Stats** panel attributes unique APs and packets to each active capture adapter using Kismet's per-device source data. It also shows Kismet's live channel and hop-list size; a red warning and desktop notification identify an adapter configured to hop fewer than two channels. While capturing, the launcher also displays the current Wigle CSV file size.
 
 Below the AP counter, a live 60-second activity histogram measures newly discovered
 unique APs per minute. Its glanceable status changes between **Light Activity**,
@@ -31,10 +31,10 @@ Build the Debian package on this computer:
 ./packaging/build-deb.sh
 ```
 
-Copy `dist/ciacore-wardrive_1.0.0_all.deb` to the destination, then install it:
+Copy `dist/ciacore-wardrive_1.0.3_all.deb` to the destination, then install it:
 
 ```bash
-sudo apt install ./ciacore-wardrive_1.0.0_all.deb
+sudo apt install ./ciacore-wardrive_1.0.3_all.deb
 ```
 
 Published versions can instead be downloaded from the repository's
@@ -57,6 +57,8 @@ Wi-Fi adapter support, GPSD receiver configuration, and any optional `readsb` /
 Muninn ADS-B setup are machine-specific and are not changed by the package.
 
 Select one or more Wi-Fi adapters and a log directory, then select **Start Wardrive**. Each adapter has a **Channel group** selector for all supported channels, 2.4 GHz priority or full coverage, 5 GHz DFS/non-DFS/full coverage, combined 2.4+5 GHz, and 6 GHz PSC channels. **Custom hop** and **Fixed channel** keep a manual field available for unusual hardware or survey plans. Kismet automatically splits hopping coverage between compatible radios.
+
+A custom hopping plan must contain at least two channels. The launcher refuses a one-channel hop configuration because it looks enabled in Kismet while behaving like a fixed-channel capture; use **Fixed channel** when that behavior is intentional.
 
 Use the arrow beside **Wi-Fi Adapters** to collapse or expand a long adapter list.
 The header continues to show how many adapters are selected and available while the
