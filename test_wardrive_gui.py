@@ -2,6 +2,7 @@ import unittest
 import tempfile
 import io
 import json
+import queue
 import stat
 import urllib.error
 from datetime import datetime
@@ -19,7 +20,8 @@ from wardrive_gui import (
     compare_sessions, export_geodata, find_recoverable_databases, read_wigle_records,
     session_analytics, load_profiles, save_profiles,
     gps_device_choices, gps_device_kind,
-    ap_activity_level,
+    ap_activity_level, adapter_stats_visible_rows, OUTPUT_BATCH_LINES,
+    CHANNEL_PLANS, CUSTOM_HOP_PLAN, FIXED_CHANNEL_PLAN, channel_plan_for,
 )
 
 
@@ -45,6 +47,26 @@ class BuildCommandTests(unittest.TestCase):
         self.assertEqual(ap_activity_level(12, 2), ("ACTIVE", "cyan"))
         self.assertEqual(ap_activity_level(3, 5), ("LIGHT ACTIVITY", "amber"))
         self.assertEqual(ap_activity_level(0, 31), ("DEAD ZONE", "danger"))
+
+    @patch("wardrive_gui.time.monotonic", return_value=100.0)
+    def test_ap_activity_uses_fast_window_and_colors_count(self, _monotonic):
+        app = WardriveApp.__new__(WardriveApp)
+        app.ap_activity_samples = [(85.0, 10)]
+        app._last_ap_pickup = 85.0
+        app.process = MagicMock()
+        app.process.poll.return_value = None
+        app.ap_activity = MagicMock()
+        app.ap_activity_label = MagicMock()
+        app.ap_count_label = MagicMock()
+        app.ap_activity_canvas = None
+
+        WardriveApp._record_ap_activity(app, 11)
+
+        self.assertIn("rolling 15s", app.ap_activity.set.call_args.args[0])
+        self.assertEqual(
+            app.ap_count_label.configure.call_args.kwargs["fg"],
+            app.ap_activity_label.configure.call_args.kwargs["fg"],
+        )
 
     def test_compares_analyzes_and_exports_sessions(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -109,6 +131,12 @@ class BuildCommandTests(unittest.TestCase):
             'wlan0:channel_hop=true,channels="1,6,11"',
             "wlan1:channel_hop=false,channel=36",
         ])
+
+    def test_recognizes_channel_group_presets_and_custom_sources(self):
+        self.assertEqual(channel_plan_for("hop", "1, 6, 11"), "2.4 GHz priority (1, 6, 11)")
+        self.assertEqual(channel_plan_for("hop", "3,7"), CUSTOM_HOP_PLAN)
+        self.assertEqual(channel_plan_for("fixed", "36"), FIXED_CHANNEL_PLAN)
+        self.assertEqual(CHANNEL_PLANS["5 GHz non-DFS"][0], "hop")
 
     def test_formats_gps_values(self):
         self.assertEqual(gps_text(41.25, "°"), "41.250000°")
@@ -177,6 +205,36 @@ class BuildCommandTests(unittest.TestCase):
         }]}]
 
         self.assertEqual(adapter_pickup_stats(sources, devices), [("wlan0mon", 1, 42)])
+
+    def test_adapter_stats_table_grows_then_caps_for_scrolling(self):
+        self.assertEqual(adapter_stats_visible_rows(0), 3)
+        self.assertEqual(adapter_stats_visible_rows(6), 6)
+        self.assertEqual(adapter_stats_visible_rows(20), 8)
+
+    def test_output_drain_yields_after_a_bounded_batch(self):
+        app = WardriveApp.__new__(WardriveApp)
+        app.output_queue = queue.Queue()
+        for index in range(OUTPUT_BATCH_LINES + 1):
+            app.output_queue.put(f"line {index}\n")
+        app._append_output = MagicMock()
+        app.after = MagicMock()
+
+        WardriveApp._drain_output(app)
+
+        self.assertEqual(app.output_queue.qsize(), 1)
+        app._append_output.assert_called_once()
+        self.assertEqual(app._append_output.call_args.args[0].count("\n"), OUTPUT_BATCH_LINES)
+        app.after.assert_called_once_with(10, app._drain_output)
+
+    def test_output_widget_discards_old_console_lines(self):
+        app = WardriveApp.__new__(WardriveApp)
+        app.output = MagicMock()
+        app._output_line_count = 4999
+
+        WardriveApp._append_output(app, "one\ntwo\nthree\n")
+
+        app.output.delete.assert_called_once_with("1.0", "3.0")
+        self.assertEqual(app._output_line_count, 5000)
 
     def test_extracts_only_valid_gps_tagged_map_points(self):
         devices = [{

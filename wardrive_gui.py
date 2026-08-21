@@ -31,6 +31,21 @@ from tkinter import filedialog, messagebox, ttk
 
 
 APP_NAME = "Kismet Wardrive Launcher"
+OUTPUT_BATCH_LINES = 200
+OUTPUT_MAX_LINES = 5000
+AP_ACTIVITY_WINDOW_SECONDS = 15
+CHANNEL_PLANS: dict[str, tuple[str, str]] = {
+    "All supported": ("hop", ""),
+    "2.4 GHz priority (1, 6, 11)": ("hop", "1,6,11"),
+    "2.4 GHz all (US 1-11)": ("hop", "1,2,3,4,5,6,7,8,9,10,11"),
+    "5 GHz non-DFS": ("hop", "36,40,44,48,149,153,157,161,165"),
+    "5 GHz DFS": ("hop", "52,56,60,64,100,104,108,112,116,120,124,128,132,136,140,144"),
+    "5 GHz all": ("hop", "36,40,44,48,52,56,60,64,100,104,108,112,116,120,124,128,132,136,140,144,149,153,157,161,165"),
+    "2.4 + 5 GHz": ("hop", "1,2,3,4,5,6,7,8,9,10,11,36,40,44,48,52,56,60,64,100,104,108,112,116,120,124,128,132,136,140,144,149,153,157,161,165"),
+    "6 GHz PSC": ("hop", "5,21,37,53,69,85,101,117,133,149,165,181,197,213,229"),
+}
+CUSTOM_HOP_PLAN = "Custom hop"
+FIXED_CHANNEL_PLAN = "Fixed channel"
 ASSET_DIR = Path(__file__).resolve().parent / "assets"
 
 # WDGoWars-inspired command-center palette.  Kept here instead of scattered
@@ -294,6 +309,17 @@ class CaptureSource:
     interface: str
     mode: str = "hop"
     channels: str = ""
+
+
+def channel_plan_for(mode: str, channels: str) -> str:
+    """Return the preset label matching a stored source configuration."""
+    normalized = ",".join(part.strip() for part in channels.split(",") if part.strip())
+    if mode == "fixed":
+        return FIXED_CHANNEL_PLAN
+    for label, (plan_mode, plan_channels) in CHANNEL_PLANS.items():
+        if mode == plan_mode and normalized == plan_channels:
+            return label
+    return CUSTOM_HOP_PLAN
 
 
 @dataclass(frozen=True)
@@ -819,6 +845,11 @@ def responsive_window_size(screen_width: int, screen_height: int) -> tuple[int, 
     return width, height
 
 
+def adapter_stats_visible_rows(adapter_count: int) -> int:
+    """Size the pickup table without letting a large adapter set take over the page."""
+    return max(3, min(8, adapter_count))
+
+
 class WardriveApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -890,6 +921,7 @@ class WardriveApp(tk.Tk):
         self._adapter_packet_samples: dict[str, tuple[int, float]] = {}
         self._gps_was_fixed = False
         self._adapter_stall_notified: set[str] = set()
+        self._output_line_count = 0
 
         self._configure_theme()
         self._build_ui()
@@ -1099,10 +1131,11 @@ class WardriveApp(tk.Tk):
             ap_frame, text="// UNIQUE ACCESS POINTS FOUND", bg=COLORS["panel"], fg=COLORS["cyan"],
             font=("DejaVu Sans Mono", 10, "bold"),
         ).pack(pady=(8, 0))
-        tk.Label(
+        self.ap_count_label = tk.Label(
             ap_frame, textvariable=self.ap_count, bg=COLORS["panel"], fg=COLORS["amber"],
             font=("DejaVu Sans Mono", 42, "bold"),
-        ).pack()
+        )
+        self.ap_count_label.pack()
         tk.Label(ap_frame, textvariable=self.ap_status, bg=COLORS["panel"], fg=COLORS["muted"],
                  font=("DejaVu Sans Mono", 9)).pack(pady=(0, 8))
         self.ap_activity_canvas = tk.Canvas(
@@ -1143,7 +1176,12 @@ class WardriveApp(tk.Tk):
         self.adapter_stats.column("packets", width=120, stretch=False, anchor="e")
         self.adapter_stats.column("rate", width=90, stretch=False, anchor="e")
         self.adapter_stats.column("health", width=85, stretch=False, anchor="center")
-        self.adapter_stats.grid(row=0, column=0, sticky="ew")
+        adapter_stats_scroll = ttk.Scrollbar(
+            adapter_frame, orient="vertical", command=self.adapter_stats.yview,
+        )
+        self.adapter_stats.configure(yscrollcommand=adapter_stats_scroll.set)
+        self.adapter_stats.grid(row=0, column=0, sticky="nsew")
+        adapter_stats_scroll.grid(row=0, column=1, sticky="ns")
 
         wdgwars = ttk.LabelFrame(outer, text=" WDGWARS UPLINK ", padding=8)
         wdgwars.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(0, 10))
@@ -1284,7 +1322,10 @@ class WardriveApp(tk.Tk):
             self.ap_activity_samples.clear()
             self._last_ap_pickup = now if count else None
         self.ap_activity_samples.append((now, count))
-        self.ap_activity_samples = [sample for sample in self.ap_activity_samples if now - sample[0] <= 60]
+        self.ap_activity_samples = [
+            sample for sample in self.ap_activity_samples
+            if now - sample[0] <= AP_ACTIVITY_WINDOW_SECONDS
+        ]
         if len(self.ap_activity_samples) >= 2:
             elapsed = max(1.0, now - self.ap_activity_samples[0][0])
             gained = max(0, count - self.ap_activity_samples[0][1])
@@ -1293,8 +1334,11 @@ class WardriveApp(tk.Tk):
             rate = 0.0
         since = now - self._last_ap_pickup if self._last_ap_pickup is not None else None
         level, color_key = ap_activity_level(rate, since if self.process and self.process.poll() is None else None)
-        self.ap_activity.set(f"{level}  •  {rate:.1f} new APs/min  •  rolling 60s")
+        self.ap_activity.set(
+            f"{level}  •  {rate:.1f} new APs/min  •  rolling {AP_ACTIVITY_WINDOW_SECONDS}s"
+        )
         self.ap_activity_label.configure(fg=COLORS[color_key])
+        self.ap_count_label.configure(fg=COLORS[color_key])
         self._draw_ap_activity()
 
     def _draw_ap_activity(self) -> None:
@@ -1340,6 +1384,7 @@ class WardriveApp(tk.Tk):
             pass
         if latest is not None:
             self.adapter_stats.delete(*self.adapter_stats.get_children())
+            self.adapter_stats.configure(height=adapter_stats_visible_rows(len(latest)))
             now = time.monotonic()
             for adapter, access_points, packets in latest:
                 previous = self._adapter_packet_samples.get(adapter)
@@ -1561,10 +1606,12 @@ class WardriveApp(tk.Tk):
         def apply_profile() -> None:
             if profile.get() in choices:
                 mode, channels = choices[profile.get()]
-                for source_row in self.source_rows.values():
+                for source_name, source_row in self.source_rows.items():
                     if source_row["enabled"].get():
                         source_row["mode"].set(mode)
                         source_row["channels"].set(channels)
+                        source_row["plan"].set(channel_plan_for(mode, channels))
+                        self._set_channel_entry_state(source_name)
             else:
                 data = saved.get(profile.get(), {})
                 self.log_directory.set(str(data.get("log_directory", self.log_directory.get())))
@@ -1576,6 +1623,10 @@ class WardriveApp(tk.Tk):
                         if isinstance(source, dict):
                             source_row["mode"].set(str(source.get("mode", "hop")))
                             source_row["channels"].set(str(source.get("channels", "")))
+                            source_row["plan"].set(channel_plan_for(
+                                str(source.get("mode", "hop")), str(source.get("channels", ""))
+                            ))
+                            self._set_channel_entry_state(name)
             dialog.destroy()
         ttk.Button(dialog, text="Apply", command=apply_profile, style="Primary.TButton").pack(pady=12)
         name = tk.StringVar()
@@ -1802,7 +1853,7 @@ class WardriveApp(tk.Tk):
         for child in self.source_area.winfo_children():
             child.destroy()
         self.source_rows.clear()
-        for column, label in enumerate(("Use", "Adapter", "Mode", "Channel(s)")):
+        for column, label in enumerate(("Use", "Adapter", "Channel group", "Custom / fixed channel(s)")):
             ttk.Label(self.source_area, text=label).grid(row=0, column=column, sticky="w", padx=(0, 8))
         for index, interface in enumerate(interfaces, start=1):
             old = previous.get(interface, (index == 1, "hop", ""))
@@ -1810,18 +1861,44 @@ class WardriveApp(tk.Tk):
             enabled.trace_add("write", self._update_adapter_summary)
             mode = tk.StringVar(value=old[1])
             channels = tk.StringVar(value=old[2])
+            plan = tk.StringVar(value=channel_plan_for(old[1], old[2]))
             check = ttk.Checkbutton(self.source_area, variable=enabled, style="Adapter.TCheckbutton")
-            combo = ttk.Combobox(self.source_area, textvariable=mode, values=("hop", "fixed"), state="readonly", width=7)
+            combo = ttk.Combobox(
+                self.source_area, textvariable=plan,
+                values=tuple(CHANNEL_PLANS) + (CUSTOM_HOP_PLAN, FIXED_CHANNEL_PLAN),
+                state="readonly", width=30,
+            )
             entry = ttk.Entry(self.source_area, textvariable=channels)
             check.grid(row=index, column=0, sticky="w")
             ttk.Label(self.source_area, text=interface).grid(row=index, column=1, sticky="w", padx=(0, 8))
             combo.grid(row=index, column=2, sticky="w", padx=(0, 8))
             entry.grid(row=index, column=3, sticky="ew")
             self.source_rows[interface] = {
-                "enabled": enabled, "mode": mode, "channels": channels,
+                "enabled": enabled, "mode": mode, "channels": channels, "plan": plan,
                 "widgets": (check, combo, entry),
             }
+            combo.bind("<<ComboboxSelected>>", lambda _event, name=interface: self._apply_channel_plan(name))
+            self._set_channel_entry_state(interface)
         self._update_adapter_summary()
+
+    def _apply_channel_plan(self, interface: str) -> None:
+        row = self.source_rows[interface]
+        selected = str(row["plan"].get())
+        if selected in CHANNEL_PLANS:
+            mode, channels = CHANNEL_PLANS[selected]
+            row["mode"].set(mode)
+            row["channels"].set(channels)
+        elif selected == FIXED_CHANNEL_PLAN:
+            row["mode"].set("fixed")
+        else:
+            row["mode"].set("hop")
+        self._set_channel_entry_state(interface)
+
+    def _set_channel_entry_state(self, interface: str) -> None:
+        row = self.source_rows[interface]
+        entry = row["widgets"][2]
+        editable = str(row["plan"].get()) in {CUSTOM_HOP_PLAN, FIXED_CHANNEL_PLAN}
+        entry.configure(state="normal" if editable else "disabled")
 
     def _update_adapter_summary(self, *_args: object) -> None:
         selected = sum(bool(row["enabled"].get()) for row in self.source_rows.values())
@@ -1844,11 +1921,14 @@ class WardriveApp(tk.Tk):
         ]
 
     def _set_source_controls_state(self, enabled: bool) -> None:
-        for row in self.source_rows.values():
+        for name, row in self.source_rows.items():
             check, combo, entry = row["widgets"]
             check.configure(state="normal" if enabled else "disabled")
             combo.configure(state="readonly" if enabled else "disabled")
-            entry.configure(state="normal" if enabled else "disabled")
+            if enabled:
+                self._set_channel_entry_state(name)
+            else:
+                entry.configure(state="disabled")
 
     def choose_log_directory(self) -> None:
         chosen = filedialog.askdirectory(initialdir=self.log_directory.get() or str(Path.home()))
@@ -2267,6 +2347,11 @@ class WardriveApp(tk.Tk):
     def _append_output(self, text: str) -> None:
         self.output.configure(state="normal")
         self.output.insert("end", text)
+        self._output_line_count += text.count("\n")
+        excess = self._output_line_count - OUTPUT_MAX_LINES
+        if excess > 0:
+            self.output.delete("1.0", f"{excess + 1}.0")
+            self._output_line_count -= excess
         self.output.see("end")
         self.output.configure(state="disabled")
 
@@ -2336,6 +2421,7 @@ class WardriveApp(tk.Tk):
         self._last_ap_pickup = activity_started
         self.ap_activity.set("WAITING FOR PICKUPS  •  0.0 new APs/min")
         self.ap_activity_label.configure(fg=COLORS["muted"])
+        self.ap_count_label.configure(fg=COLORS["muted"])
         self._draw_ap_activity()
         self.capture_size.set("Waiting for Wigle CSV…")
         self.gps_track.clear()
@@ -2375,19 +2461,30 @@ class WardriveApp(tk.Tk):
         self.output_queue.put(None)
 
     def _drain_output(self) -> None:
-        try:
-            while True:
+        lines: list[str] = []
+        process_exited = False
+        for _ in range(OUTPUT_BATCH_LINES):
+            try:
                 line = self.output_queue.get_nowait()
-                if line is None:
-                    code = self.process.returncode if self.process else "unknown"
-                    self._append_output(f"\nKismet exited (code {code}).\n")
-                    self._set_stopped()
-                    self._notify("Wardrive stopped", f"Kismet exited with code {code}.")
-                else:
-                    self._append_output(line)
-        except queue.Empty:
-            pass
-        self.after(100, self._drain_output)
+            except queue.Empty:
+                break
+            if line is None:
+                process_exited = True
+                break
+            lines.append(line)
+
+        if lines:
+            self._append_output("".join(lines))
+        if process_exited:
+            code = self.process.returncode if self.process else "unknown"
+            self._append_output(f"\nKismet exited (code {code}).\n")
+            self._set_stopped()
+            self._notify("Wardrive stopped", f"Kismet exited with code {code}.")
+
+        # Yield to Tk between batches so capture output cannot starve status,
+        # AP, GPS, redraw, and input events when Kismet becomes noisy.
+        delay = 10 if len(lines) == OUTPUT_BATCH_LINES and not process_exited else 100
+        self.after(delay, self._drain_output)
 
     def stop_wardrive(self) -> None:
         if not self.process or self.process.poll() is not None:

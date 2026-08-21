@@ -56,7 +56,7 @@ sudo usermod -aG kismet "$USER"
 Wi-Fi adapter support, GPSD receiver configuration, and any optional `readsb` /
 Muninn ADS-B setup are machine-specific and are not changed by the package.
 
-Select one or more Wi-Fi adapters and a log directory, then select **Start Wardrive**. Each adapter can hop across all supported channels (leave **Channel(s)** empty), hop over a comma-separated custom list, or stay fixed on one channel. Kismet automatically splits hopping coverage between compatible radios.
+Select one or more Wi-Fi adapters and a log directory, then select **Start Wardrive**. Each adapter has a **Channel group** selector for all supported channels, 2.4 GHz priority or full coverage, 5 GHz DFS/non-DFS/full coverage, combined 2.4+5 GHz, and 6 GHz PSC channels. **Custom hop** and **Fixed channel** keep a manual field available for unusual hardware or survey plans. Kismet automatically splits hopping coverage between compatible radios.
 
 Use the arrow beside **Wi-Fi Adapters** to collapse or expand a long adapter list.
 The header continues to show how many adapters are selected and available while the
