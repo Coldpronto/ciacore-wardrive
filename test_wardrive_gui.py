@@ -21,8 +21,8 @@ from wardrive_gui import (
     session_analytics, load_profiles, save_profiles,
     gps_device_choices, gps_device_kind, gps_report_device, gps_active_device,
     ap_activity_level, adapter_stats_visible_rows, OUTPUT_BATCH_LINES,
-    CHANNEL_PLANS, CUSTOM_HOP_PLAN, FIXED_CHANNEL_PLAN, channel_plan_for,
-    hopping_configuration_errors, source_channel_status,
+    CHANNEL_PLANS, CUSTOM_HOP_PLAN, FIXED_CHANNEL_PLAN, COLORS, channel_plan_for,
+    hopping_configuration_errors, iw_channel_map, source_channel_status,
 )
 
 
@@ -80,10 +80,7 @@ class BuildCommandTests(unittest.TestCase):
         WardriveApp._record_ap_activity(app, 11)
 
         self.assertIn("rolling 15s", app.ap_activity.set.call_args.args[0])
-        self.assertEqual(
-            app.ap_count_label.configure.call_args.kwargs["fg"],
-            app.ap_activity_label.configure.call_args.kwargs["fg"],
-        )
+        self.assertEqual(app.ap_count_label.configure.call_args.kwargs["fg"], COLORS["cyan"])
 
     def test_compares_analyzes_and_exports_sessions(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -163,6 +160,22 @@ class BuildCommandTests(unittest.TestCase):
             "kismet.datasource.hop_channels": ["1", "6", "11"],
         }]
         self.assertEqual(source_channel_status(sources), [("wlan0mon", "6", 3, True)])
+
+    def test_falls_back_to_kernel_channel_when_kismet_channel_is_blank(self):
+        sources = [{
+            "kismet.datasource.capture_interface": "wlan1mon",
+            "kismet.datasource.channel": "",
+            "kismet.datasource.hopping": 1,
+            "kismet.datasource.hop_channels": ["1", "6", "11"],
+        }]
+        iw_output = """phy#2
+\tInterface wlan1mon
+\t\tifindex 12
+\t\tchannel 144 (5720 MHz), width: 20 MHz (no HT)
+"""
+        channels = iw_channel_map(iw_output)
+        self.assertEqual(channels, {"wlan1mon": "144"})
+        self.assertEqual(source_channel_status(sources, channels), [("wlan1mon", "144", 3, True)])
 
     def test_recognizes_channel_group_presets_and_custom_sources(self):
         self.assertEqual(channel_plan_for("hop", "1, 6, 11"), "2.4 GHz priority (1, 6, 11)")
@@ -266,6 +279,17 @@ class BuildCommandTests(unittest.TestCase):
         }]}]
 
         self.assertEqual(adapter_pickup_stats(sources, devices), [("wlan0mon", 1, 42)])
+
+    def test_adapter_stats_prefers_live_datasource_packet_counter(self):
+        sources = [{
+            "kismet.datasource.uuid": "source-1",
+            "kismet.datasource.interface": "wlan0mon",
+            "kismet.datasource.num_packets": 900,
+        }]
+        devices = [{"kismet.device.base.seenby": {
+            "source-1": {"kismet.common.seenby.num_packets": 42},
+        }}]
+        self.assertEqual(adapter_pickup_stats(sources, devices), [("wlan0mon", 1, 900)])
 
     def test_adapter_stats_table_grows_then_caps_for_scrolling(self):
         self.assertEqual(adapter_stats_visible_rows(0), 3)

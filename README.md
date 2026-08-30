@@ -9,7 +9,7 @@ driving: green means **GPS Locked**, amber means **Acquiring GPS**, and red mean
 **GPS Lost** or stale coordinates. It includes the selected receiver, satellite count,
 and fix age. Warning states pulse gently, with one audible cue when a lock is lost and
 two when it recovers.
-The large **Unique Access Points Found** counter and signal-sorted network list read Kismet's dedicated Wi-Fi AP view and update every two seconds. The **Adapter Pickup Stats** panel attributes unique APs and packets to each active capture adapter using Kismet's per-device source data. It also shows Kismet's live channel and hop-list size; a red warning and desktop notification identify an adapter configured to hop fewer than two channels. While capturing, the launcher also displays the current Wigle CSV file size.
+The large **Unique Access Points Found** counter and signal-sorted network list read Kismet's dedicated Wi-Fi AP view every second. A temporary failed API poll keeps the last valid display instead of clearing or greying it. The **Adapter Pickup Stats** panel attributes unique APs and Kismet's live packet count to each capture adapter. It shows the current channel and verifies hopping only after observing the radio change channels; `verifying` changes to `verified` once at least two channels have been seen. Adapter health distinguishes normal `QUIET` airtime from a sustained `STALLED` condition and reports Kismet's `RETRYING` or `DISCONNECTED` source state. Kismet's automatic source retry remains enabled for unplugged or reset adapters. While capturing, the launcher also displays the current Wigle CSV file size.
 
 Below the AP counter, a live 60-second activity histogram measures newly discovered
 unique APs per minute. Its glanceable status changes between **Light Activity**,
@@ -31,10 +31,10 @@ Build the Debian package on this computer:
 ./packaging/build-deb.sh
 ```
 
-Copy `dist/ciacore-wardrive_1.0.3_all.deb` to the destination, then install it:
+Copy `dist/ciacore-wardrive_1.0.4_all.deb` to the destination, then install it:
 
 ```bash
-sudo apt install ./ciacore-wardrive_1.0.3_all.deb
+sudo apt install ./ciacore-wardrive_1.0.4_all.deb
 ```
 
 Published versions can instead be downloaded from the repository's

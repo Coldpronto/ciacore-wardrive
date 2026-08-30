@@ -2,7 +2,7 @@
 set -eu
 
 project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-version=${1:-1.0.3}
+version=${1:-1.0.4}
 build_dir="$project_dir/build/deb-root"
 output_dir="$project_dir/dist"
 
